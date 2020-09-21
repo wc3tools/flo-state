@@ -1,0 +1,12 @@
+[package]
+name = "flo-state"
+version = "0.1.0"
+authors = ["Flux Xu <fluxxu@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+flo-task = { git = "https://github.com/wc3tools/flo-task.git" }
+
+tokio = { version = "0.2", features = ["sync", "macros", "rt-threaded"] }
+futures = "0.3"
+thiserror = "1.0"
