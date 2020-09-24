@@ -25,48 +25,40 @@ impl<M, S> Container<M, S> {
     let scope = SpawnScope::new();
     let (tx, mut rx) = channel(8);
 
-    tokio::spawn(
-      {
-        let mut scope = scope.handle();
-        async move {
-          let mut state = initial;
-          let mut handler = handler;
-          loop {
-            tokio::select! {
-              _ = scope.left() => {
-                break;
-              }
-              Some(msg) = rx.recv() => {
-                match msg {
-                  InternalMessage::Message(msg) => {
-                    handler.handle(&mut state, msg);
+    tokio::spawn({
+      let mut scope = scope.handle();
+      async move {
+        let mut state = initial;
+        let mut handler = handler;
+        loop {
+          tokio::select! {
+            _ = scope.left() => {
+              break;
+            }
+            Some(msg) = rx.recv() => {
+              match msg {
+                InternalMessage::Message(msg, tx) => {
+                  handler.handle(&mut state, msg);
+                  if let Some(tx) = tx {
+                    tx.send(());
                   }
-                  InternalMessage::Terminate(tx) => {
-                    tx.send(state).ok();
-                    break;
-                  }
+                }
+                InternalMessage::Terminate(tx) => {
+                  tx.send(state).ok();
+                  break;
                 }
               }
             }
           }
         }
       }
-    );
+    });
 
     Self { tx, scope }
   }
 
   pub fn handle(&self) -> Handle<M, S> {
     Handle(self.tx.clone())
-  }
-
-  pub async fn send(&mut self, msg: M) -> Result<()> {
-    self
-      .tx
-      .send(InternalMessage::Message(msg))
-      .await
-      .map_err(|_| Error::WorkerGone)?;
-    Ok(())
   }
 
   pub async fn into_state(mut self) -> Result<S> {
@@ -80,16 +72,33 @@ impl<M, S> Container<M, S> {
   }
 }
 
-#[derive(Clone)]
+#[derive(Debug)]
 pub struct Handle<M, S>(Sender<InternalMessage<M, S>>);
 impl<M, S> Handle<M, S> {
   pub async fn send(&mut self, msg: M) -> Result<(), Error> {
     self
       .0
-      .send(InternalMessage::Message(msg))
+      .send(InternalMessage::Message(msg, None))
       .await
       .map_err(|_| Error::WorkerGone)?;
     Ok(())
+  }
+
+  pub async fn send_and_wait(&mut self, msg: M) -> Result<(), Error> {
+    let (tx, rx) = ReplyChannel::new();
+    self
+      .0
+      .send(InternalMessage::Message(msg, Some(tx)))
+      .await
+      .map_err(|_| Error::WorkerGone)?;
+    rx.await;
+    Ok(())
+  }
+}
+
+impl<M, S> Clone for Handle<M, S> {
+  fn clone(&self) -> Self {
+    Handle(self.0.clone())
   }
 }
 
@@ -100,7 +109,7 @@ pub trait Handler<S> {
 }
 
 enum InternalMessage<M, S> {
-  Message(M),
+  Message(M, Option<ReplyChannel<()>>),
   Terminate(oneshot::Sender<S>),
 }
 
@@ -146,17 +155,19 @@ async fn test_state() {
     }
   }
 
-  let mut container = Container::new(State { value: 0 }, TestHandler);
+  let container = Container::new(State { value: 0 }, TestHandler);
+  let mut handle = container.handle();
+
   for _ in 0..10_usize {
-    container.send(Msg::Add).await.unwrap();
+    handle.send(Msg::Add).await.unwrap();
   }
 
   for _ in 0..20_usize {
-    container.send(Msg::Sub).await.unwrap();
+    handle.send(Msg::Sub).await.unwrap();
   }
 
   let (tx, rx) = ReplyChannel::new();
-  container.send(Msg::GetValue { tx }).await.unwrap();
+  handle.send(Msg::GetValue { tx }).await.unwrap();
   let value = rx.await;
   assert_eq!(value, Some(-10));
 

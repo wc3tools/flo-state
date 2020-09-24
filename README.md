@@ -1,6 +1,6 @@
 # flo-state
 
-Async state management by message passing and an event loop.
+Async state management library.
 
 ```rust
 #[tokio::test]
