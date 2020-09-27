@@ -43,6 +43,14 @@ impl<M, S> Container<M, S> {
                     tx.send(());
                   }
                 }
+                InternalMessage::Batch(msgs, tx) => {
+                  for msg in msgs {
+                    handler.handle(&mut state, msg);
+                  }
+                  if let Some(tx) = tx {
+                    tx.send(());
+                  }
+                }
                 InternalMessage::Terminate(tx) => {
                   tx.send(state).ok();
                   break;
@@ -94,6 +102,26 @@ impl<M, S> Handle<M, S> {
     rx.await;
     Ok(())
   }
+
+  pub async fn send_batch(&mut self, batch: Vec<M>) -> Result<(), Error> {
+    self
+      .0
+      .send(InternalMessage::Batch(batch, None))
+      .await
+      .map_err(|_| Error::WorkerGone)?;
+    Ok(())
+  }
+
+  pub async fn send_batch_and_wait(&mut self, batch: Vec<M>) -> Result<(), Error> {
+    let (tx, rx) = ReplyChannel::new();
+    self
+      .0
+      .send(InternalMessage::Batch(batch, Some(tx)))
+      .await
+      .map_err(|_| Error::WorkerGone)?;
+    rx.await;
+    Ok(())
+  }
 }
 
 impl<M, S> Clone for Handle<M, S> {
@@ -110,6 +138,7 @@ pub trait Handler<S> {
 
 enum InternalMessage<M, S> {
   Message(M, Option<ReplyChannel<()>>),
+  Batch(Vec<M>, Option<ReplyChannel<()>>),
   Terminate(oneshot::Sender<S>),
 }
 
