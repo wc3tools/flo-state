@@ -130,14 +130,7 @@ impl<S> Addr<S> {
     where M: Message + Send + 'static,
           S: Handler<M>
   {
-    let (tx, rx) = oneshot::channel();
-    let boxed = Box::new(Some(Item {
-      message,
-      tx
-    }));
-    self.tx.clone().send(ContainerMessage::Item(boxed)).await.map_err(|_| Error::WorkerGone)?;
-    let res = rx.await.map_err(|_| Error::WorkerGone)?.ok_or_else(|| Error::WorkerGone)?;
-    Ok(res)
+    send(&self.tx, message).await
   }
 }
 
@@ -192,6 +185,13 @@ impl<S> Container<S>
     }
   }
 
+  pub async fn send<M>(&self, message: M) -> Result<M::Result>
+    where M: Message + Send + 'static,
+          S: Handler<M>
+  {
+    send(&self.tx, message).await
+  }
+
   pub async fn into_state(mut self) -> Result<S> {
     let (tx, rx) = oneshot::channel();
     self
@@ -201,6 +201,20 @@ impl<S> Container<S>
       .map_err(|_| Error::WorkerGone)?;
     rx.await.map_err(|_| Error::WorkerGone)
   }
+}
+
+async fn send<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M) -> Result<M::Result>
+  where S: Handler<M>,
+        M: Message + Send + 'static,
+{
+  let (reply_tx, reply_rx) = oneshot::channel();
+  let boxed = Box::new(Some(Item {
+    message,
+    tx: reply_tx
+  }));
+  tx.clone().send(ContainerMessage::Item(boxed)).await.map_err(|_| Error::WorkerGone)?;
+  let res = reply_rx.await.map_err(|_| Error::WorkerGone)?.ok_or_else(|| Error::WorkerGone)?;
+  Ok(res)
 }
 
 enum ContainerMessage<S> {
