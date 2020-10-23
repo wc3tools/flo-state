@@ -1,8 +1,3 @@
-# flo-state
-
-Async state management library inspired by [actix](https://docs.rs/actix).
-
-```rust
 use flo_state::*;
 use futures::FutureExt;
 
@@ -87,4 +82,3 @@ async fn test_state() {
   let state = container.into_state().await.unwrap();
   assert_eq!(state.value, -10)
 }
-```
