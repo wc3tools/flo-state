@@ -1,14 +1,16 @@
 mod error;
 use error::{Result, Error};
 
-use futures::FutureExt;
+use std::future::Future;
+use futures::{FutureExt, StreamExt};
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::mpsc;
-use flo_task::SpawnScope;
 use tokio::sync::oneshot::Sender;
+use flo_task::SpawnScope;
 
 use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
 
 pub type FutureResponse<T> = BoxFuture<'static, T>;
 
@@ -123,6 +125,7 @@ pub enum HandleResult {
 #[derive(Debug, Clone)]
 pub struct Addr<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
+  spawn_tx: mpsc::UnboundedSender<BoxFuture<'static, ()>>,
 }
 
 impl<S> Addr<S> {
@@ -132,12 +135,21 @@ impl<S> Addr<S> {
   {
     send(&self.tx, message).await
   }
+
+  /// Spawns a future into the container.
+  /// All futures spawned into the container will be cancelled if the container dropped.
+  pub fn spawn<F>(&self, f: F)
+    where F: Future<Output = ()> + Send + 'static
+  {
+    self.spawn_tx.send(f.boxed()).ok();
+  }
 }
 
 #[derive(Debug)]
 pub struct Container<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
   scope: SpawnScope,
+  spawn_tx: mpsc::UnboundedSender<BoxFuture<'static, ()>>,
 }
 
 impl<S> Container<S>
@@ -147,16 +159,20 @@ impl<S> Container<S>
   {
     let scope = SpawnScope::new();
     let (tx, mut rx) = mpsc::channel(8);
+    let (spawn_tx, mut spawn_rx) = mpsc::unbounded_channel();
 
     tokio::spawn({
       let mut scope = scope.handle();
       async move {
         let mut state = initial;
+        let mut tasks = FuturesUnordered::new();
+        tasks.push(futures::future::pending().boxed());
         loop {
           tokio::select! {
             _ = scope.left() => {
               break;
             }
+            _ = tasks.next() => {}
             Some(item) = rx.recv() => {
               match item {
                 ContainerMessage::Item(mut item) => {
@@ -171,17 +187,21 @@ impl<S> Container<S>
                 }
               }
             }
+            Some(f) = spawn_rx.recv() => {
+              tasks.push(f);
+            }
           }
         }
       }
     });
 
-    Self { tx, scope }
+    Self { tx, scope, spawn_tx }
   }
 
   pub fn addr(&self) -> Addr<S> {
     Addr {
-      tx: self.tx.clone()
+      tx: self.tx.clone(),
+      spawn_tx: self.spawn_tx.clone(),
     }
   }
 
@@ -190,6 +210,14 @@ impl<S> Container<S>
           S: Handler<M>
   {
     send(&self.tx, message).await
+  }
+
+  /// Spawns a future into the container.
+  /// All futures spawned into the container will be cancelled if the container dropped.
+  pub fn spawn<F>(&self, f: F)
+  where F: Future<Output = ()> + Send + 'static
+  {
+    self.spawn_tx.send(f.boxed()).ok();
   }
 
   pub async fn into_state(mut self) -> Result<S> {
