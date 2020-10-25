@@ -17,10 +17,10 @@ pub trait Message: Send + 'static {
 }
 
 #[async_trait]
-pub trait Handler<M>: Send
+pub trait Handler<M>: Send + Sized
   where M: Message,
 {
-  async fn handle(&mut self, message: M) -> M::Result;
+  async fn handle(&mut self, ctx: &mut Context<Self>, message: M) -> M::Result;
 }
 
 struct Item<M>
@@ -34,16 +34,16 @@ impl<M> Item<M>
   where
     M: Message
 {
-  async fn handle<S>(self, state: &mut S)
+  async fn handle<S>(self, state: &mut S, ctx: &mut Context<S>)
     where S: Handler<M>
   {
-    self.tx.send(state.handle(self.message).await).ok();
+    self.tx.send(state.handle(ctx, self.message).await).ok();
   }
 }
 
 #[async_trait]
 trait ItemObj<S>: Send + 'static {
-  async fn handle(&mut self, state: &mut S);
+  async fn handle(&mut self, state: &mut S, ctx: &mut Context<S>);
 }
 
 #[async_trait]
@@ -52,9 +52,9 @@ impl<S, M> ItemObj<S> for Option<Item<M>>
     S: Handler<M>,
     M: Message,
 {
-  async fn handle(&mut self, state: &mut S) {
+  async fn handle(&mut self, state: &mut S, ctx: &mut Context<S>) {
     if let Some(item) = self.take() {
-      item.handle(state).await;
+      item.handle(state, ctx).await;
     }
   }
 }
@@ -82,6 +82,28 @@ impl<S> Addr<S> {
   }
 }
 
+pub struct Context<S> {
+  tx: mpsc::Sender<ContainerMessage<S>>,
+  spawn_tx: mpsc::UnboundedSender<BoxFuture<'static, ()>>,
+}
+
+impl<S> Context<S> {
+  pub fn addr(&self) -> Addr<S> {
+    Addr {
+      tx: self.tx.clone(),
+      spawn_tx: self.spawn_tx.clone(),
+    }
+  }
+
+  /// Spawns a future into the container.
+  /// All futures spawned into the container will be cancelled if the container dropped.
+  pub fn spawn<F>(&self, f: F)
+    where F: Future<Output = ()> + Send + 'static
+  {
+    self.spawn_tx.send(f.boxed()).ok();
+  }
+}
+
 #[derive(Debug)]
 pub struct Container<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
@@ -92,7 +114,7 @@ pub struct Container<S> {
 impl<S> Container<S>
   where S: Send + 'static
 {
-  pub fn new(initial: S) -> Self
+  pub fn new(initial_state: S) -> Self
   {
     let scope = SpawnScope::new();
     let (tx, mut rx) = mpsc::channel(8);
@@ -100,8 +122,12 @@ impl<S> Container<S>
 
     tokio::spawn({
       let mut scope = scope.handle();
+      let mut ctx = Context {
+        tx: tx.clone(),
+        spawn_tx: spawn_tx.clone(),
+      };
       async move {
-        let mut state = initial;
+        let mut state = initial_state;
         let mut tasks = FuturesUnordered::new();
         tasks.push(futures::future::pending().boxed());
         loop {
@@ -113,7 +139,7 @@ impl<S> Container<S>
             Some(item) = rx.recv() => {
               match item {
                 ContainerMessage::Item(mut item) => {
-                  item.handle(&mut state).await;
+                  item.handle(&mut state, &mut ctx).await;
                 }
                 ContainerMessage::Terminate(tx) => {
                   tx.send(state).ok();

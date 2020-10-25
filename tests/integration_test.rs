@@ -60,7 +60,7 @@ impl Message for Add {
 
 #[async_trait]
 impl Handler<Add> for State {
-  async fn handle(&mut self, _: Add) {
+  async fn handle(&mut self, _: &mut Context<Self>, _: Add) {
     self.value += 1
   }
 }
@@ -72,7 +72,7 @@ impl Message for Sub {
 
 #[async_trait]
 impl Handler<Sub> for State {
-  async fn handle(&mut self, _: Sub) {
+  async fn handle(&mut self, _: &mut Context<Self>, _: Sub) {
     self.value -= 1
   }
 }
@@ -84,7 +84,7 @@ impl Message for GetValue {
 
 #[async_trait]
 impl Handler<GetValue> for State {
-  async fn handle(&mut self, _: GetValue) -> i64 {
+  async fn handle(&mut self, _: &mut Context<Self>, _: GetValue) -> i64 {
     self.value
   }
 }
