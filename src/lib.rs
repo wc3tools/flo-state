@@ -6,7 +6,7 @@ use futures::{FutureExt, StreamExt};
 use tokio::sync::oneshot;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot::Sender;
-use async_trait::async_trait;
+pub use async_trait::async_trait;
 use flo_task::SpawnScope;
 
 use futures::future::BoxFuture;
