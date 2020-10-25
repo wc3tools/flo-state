@@ -1,5 +1,5 @@
 use flo_state::*;
-use futures::FutureExt;
+use async_trait::async_trait;
 
 #[tokio::test]
 async fn test_send() {
@@ -15,9 +15,6 @@ async fn test_send() {
   }
 
   let value = addr.send(GetValue).await.unwrap();
-  assert_eq!(value, -10);
-
-  let value = addr.send(GetValueAsync).await.unwrap();
   assert_eq!(value, -10);
 
   let state = container.into_state().await.unwrap();
@@ -61,10 +58,9 @@ impl Message for Add {
   type Result = ();
 }
 
+#[async_trait]
 impl Handler<Add> for State {
-  type Result = ();
-
-  fn handle(&mut self, _: Add) -> Self::Result {
+  async fn handle(&mut self, _: Add) {
     self.value += 1
   }
 }
@@ -74,10 +70,9 @@ impl Message for Sub {
   type Result = ();
 }
 
+#[async_trait]
 impl Handler<Sub> for State {
-  type Result = ();
-
-  fn handle(&mut self, _: Sub) -> Self::Result {
+  async fn handle(&mut self, _: Sub) {
     self.value -= 1
   }
 }
@@ -87,26 +82,9 @@ impl Message for GetValue {
   type Result = i64;
 }
 
+#[async_trait]
 impl Handler<GetValue> for State {
-  type Result = i64;
-
-  fn handle(&mut self, _: GetValue) -> Self::Result {
+  async fn handle(&mut self, _: GetValue) -> i64 {
     self.value
-  }
-}
-
-struct GetValueAsync;
-impl Message for GetValueAsync {
-  type Result = i64;
-}
-
-impl Handler<GetValueAsync> for State {
-  type Result = FutureResponse<i64>;
-
-  fn handle(&mut self, _: GetValueAsync) -> Self::Result {
-    let value = self.value;
-    async move {
-      value
-    }.boxed()
   }
 }
