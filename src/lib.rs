@@ -1,4 +1,4 @@
-mod error;
+pub mod error;
 use error::{Result, Error};
 
 use std::future::Future;
@@ -59,10 +59,19 @@ impl<S, M> ItemObj<S> for Option<Item<M>>
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Addr<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
   spawn_tx: mpsc::UnboundedSender<BoxFuture<'static, ()>>,
+}
+
+impl<S> Clone for Addr<S> {
+  fn clone(&self) -> Self {
+    Addr {
+      tx: self.tx.clone(),
+      spawn_tx: self.spawn_tx.clone(),
+    }
+  }
 }
 
 impl<S> Addr<S> {
@@ -71,14 +80,6 @@ impl<S> Addr<S> {
           S: Handler<M>
   {
     send(&self.tx, message).await
-  }
-
-  /// Spawns a future into the container.
-  /// All futures spawned into the container will be cancelled if the container dropped.
-  pub fn spawn<F>(&self, f: F)
-    where F: Future<Output = ()> + Send + 'static
-  {
-    self.spawn_tx.send(f.boxed()).ok();
   }
 }
 
