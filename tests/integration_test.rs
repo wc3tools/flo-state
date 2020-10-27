@@ -49,9 +49,45 @@ async fn test_spawn() {
   tx.send(t).await.err().unwrap();
 }
 
+#[tokio::test]
+async fn test_callbacks() {
+  use tokio::sync::oneshot;
+  struct Callbacks {
+    started: Option<oneshot::Sender<()>>,
+    stopped: oneshot::Sender<()>,
+  }
+
+  #[async_trait]
+  impl Actor for Callbacks {
+    async fn started(&mut self, _: &mut Context<Self>) {
+      self.started.take().unwrap().send(()).ok();
+    }
+
+    async fn stopped(self) {
+      self.stopped.send(()).ok();
+    }
+  }
+
+  let (started, rx_started) = oneshot::channel();
+  let (stopped, rx_stopped) = oneshot::channel();
+
+  let state = Callbacks {
+    started: Some(started),
+    stopped
+  };
+
+  let owner = state.start();
+  drop(owner);
+
+  rx_started.await.unwrap();
+  rx_stopped.await.unwrap();
+}
+
 struct State {
   value: i64,
 }
+
+impl Actor for State {}
 
 struct Add;
 impl Message for Add {

@@ -12,6 +12,15 @@ use flo_task::SpawnScope;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 
+#[async_trait]
+pub trait Actor: Send + Sized + 'static {
+  async fn started(&mut self, _ctx: &mut Context<Self>) {}
+  async fn stopped(self) {}
+  fn start(self) -> Container<Self> {
+    Container::new(self)
+  }
+}
+
 pub trait Message: Send + 'static {
   type Result: Send + 'static;
 }
@@ -113,7 +122,7 @@ pub struct Container<S> {
 }
 
 impl<S> Container<S>
-  where S: Send + 'static
+  where S: Actor
 {
   pub fn new(initial_state: S) -> Self
   {
@@ -131,9 +140,14 @@ impl<S> Container<S>
         let mut state = initial_state;
         let mut tasks = FuturesUnordered::new();
         tasks.push(futures::future::pending().boxed());
+
+        state.started(&mut ctx).await;
+
         loop {
           tokio::select! {
             _ = scope.left() => {
+              drop(tasks);
+              state.stopped().await;
               break;
             }
             _ = tasks.next() => {}
@@ -210,3 +224,5 @@ enum ContainerMessage<S> {
   Item(Box<dyn ItemObj<S>>),
   Terminate(oneshot::Sender<S>),
 }
+
+impl Actor for () {}
