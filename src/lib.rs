@@ -1,4 +1,5 @@
 pub mod error;
+pub mod reply;
 use error::{Error, Result};
 
 pub use async_trait::async_trait;
@@ -50,6 +51,7 @@ where
 trait MessageSender<M>
 where
   M: Message,
+  Self: Send
 {
   async fn send(&self, message: M) -> Result<M::Result>;
 }
