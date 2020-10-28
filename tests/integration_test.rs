@@ -1,5 +1,5 @@
-use flo_state::*;
 use async_trait::async_trait;
+use flo_state::*;
 
 #[tokio::test]
 async fn test_send() {
@@ -73,7 +73,7 @@ async fn test_callbacks() {
 
   let state = Callbacks {
     started: Some(started),
-    stopped
+    stopped,
   };
 
   let owner = state.start();

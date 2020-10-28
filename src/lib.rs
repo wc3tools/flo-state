@@ -1,13 +1,13 @@
 pub mod error;
-use error::{Result, Error};
+use error::{Error, Result};
 
-use std::future::Future;
-use futures::{FutureExt, StreamExt};
-use tokio::sync::oneshot;
-use tokio::sync::mpsc;
-use tokio::sync::oneshot::Sender;
 pub use async_trait::async_trait;
 use flo_task::SpawnScope;
+use futures::{FutureExt, StreamExt};
+use std::future::Future;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::sync::oneshot::Sender;
 
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
@@ -27,24 +27,59 @@ pub trait Message: Send + 'static {
 
 #[async_trait]
 pub trait Handler<M>: Send + Sized
-  where M: Message,
+where
+  M: Message,
 {
   async fn handle(&mut self, ctx: &mut Context<Self>, message: M) -> M::Result;
 }
 
+pub struct Recipient<M> {
+  tx: Box<dyn MessageSender<M>>,
+}
+
+impl<M> Recipient<M>
+where
+  M: Message,
+{
+  pub async fn send(&self, message: M) -> Result<M::Result> {
+    self.tx.send(message).await
+  }
+}
+
+#[async_trait]
+trait MessageSender<M>
+where
+  M: Message,
+{
+  async fn send(&self, message: M) -> Result<M::Result>;
+}
+
+#[async_trait]
+impl<S, M> MessageSender<M> for Addr<S>
+where
+  S: Handler<M>,
+  M: Message,
+{
+  async fn send(&self, message: M) -> Result<M::Result> {
+    self.send(message).await
+  }
+}
+
 struct Item<M>
-where M: Message
+where
+  M: Message,
 {
   message: M,
-  tx: Sender<M::Result>
+  tx: Sender<M::Result>,
 }
 
 impl<M> Item<M>
-  where
-    M: Message
+where
+  M: Message,
 {
   async fn handle<S>(self, state: &mut S, ctx: &mut Context<S>)
-    where S: Handler<M>
+  where
+    S: Handler<M>,
   {
     self.tx.send(state.handle(ctx, self.message).await).ok();
   }
@@ -57,9 +92,9 @@ trait ItemObj<S>: Send + 'static {
 
 #[async_trait]
 impl<S, M> ItemObj<S> for Option<Item<M>>
-  where
-    S: Handler<M>,
-    M: Message,
+where
+  S: Handler<M>,
+  M: Message,
 {
   async fn handle(&mut self, state: &mut S, ctx: &mut Context<S>) {
     if let Some(item) = self.take() {
@@ -84,9 +119,18 @@ impl<S> Clone for Addr<S> {
 }
 
 impl<S> Addr<S> {
+  pub fn recipient<M>(self) -> Recipient<M>
+  where
+    S: Handler<M> + 'static,
+    M: Message,
+  {
+    Recipient { tx: Box::new(self) }
+  }
+
   pub async fn send<M>(&self, message: M) -> Result<M::Result>
-    where M: Message + Send + 'static,
-          S: Handler<M>
+  where
+    M: Message + Send + 'static,
+    S: Handler<M>,
   {
     send(&self.tx, message).await
   }
@@ -108,7 +152,8 @@ impl<S> Context<S> {
   /// Spawns a future into the container.
   /// All futures spawned into the container will be cancelled if the container dropped.
   pub fn spawn<F>(&self, f: F)
-    where F: Future<Output = ()> + Send + 'static
+  where
+    F: Future<Output = ()> + Send + 'static,
   {
     self.spawn_tx.send(f.boxed()).ok();
   }
@@ -122,10 +167,10 @@ pub struct Container<S> {
 }
 
 impl<S> Container<S>
-  where S: Actor
+where
+  S: Actor,
 {
-  pub fn new(initial_state: S) -> Self
-  {
+  pub fn new(initial_state: S) -> Self {
     let scope = SpawnScope::new();
     let (tx, mut rx) = mpsc::channel(8);
     let (spawn_tx, mut spawn_rx) = mpsc::unbounded_channel();
@@ -170,7 +215,11 @@ impl<S> Container<S>
       }
     });
 
-    Self { tx, scope, spawn_tx }
+    Self {
+      tx,
+      scope,
+      spawn_tx,
+    }
   }
 
   pub fn addr(&self) -> Addr<S> {
@@ -181,8 +230,9 @@ impl<S> Container<S>
   }
 
   pub async fn send<M>(&self, message: M) -> Result<M::Result>
-    where M: Message + Send + 'static,
-          S: Handler<M>
+  where
+    M: Message + Send + 'static,
+    S: Handler<M>,
   {
     send(&self.tx, message).await
   }
@@ -190,7 +240,8 @@ impl<S> Container<S>
   /// Spawns a future into the container.
   /// All futures spawned into the container will be cancelled if the container dropped.
   pub fn spawn<F>(&self, f: F)
-  where F: Future<Output = ()> + Send + 'static
+  where
+    F: Future<Output = ()> + Send + 'static,
   {
     self.spawn_tx.send(f.boxed()).ok();
   }
@@ -207,15 +258,19 @@ impl<S> Container<S>
 }
 
 async fn send<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M) -> Result<M::Result>
-  where S: Handler<M>,
-        M: Message + Send + 'static,
+where
+  S: Handler<M>,
+  M: Message + Send + 'static,
 {
   let (reply_tx, reply_rx) = oneshot::channel();
   let boxed = Box::new(Some(Item {
     message,
-    tx: reply_tx
+    tx: reply_tx,
   }));
-  tx.clone().send(ContainerMessage::Item(boxed)).await.map_err(|_| Error::WorkerGone)?;
+  tx.clone()
+    .send(ContainerMessage::Item(boxed))
+    .await
+    .map_err(|_| Error::WorkerGone)?;
   let res = reply_rx.await.map_err(|_| Error::WorkerGone)?;
   Ok(res)
 }
