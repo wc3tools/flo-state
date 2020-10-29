@@ -2,16 +2,13 @@ pub mod error;
 pub mod reply;
 use error::{Error, Result};
 
-pub use async_trait::async_trait;
-use flo_task::SpawnScope;
-use futures::{FutureExt, StreamExt};
+use flo_task::{SpawnScope, SpawnScopeHandle};
 use std::future::Future;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::Sender;
 
-use futures::future::BoxFuture;
-use futures::stream::FuturesUnordered;
+pub use async_trait::async_trait;
 
 #[async_trait]
 pub trait Actor: Send + Sized + 'static {
@@ -108,14 +105,12 @@ where
 #[derive(Debug)]
 pub struct Addr<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
-  spawn_tx: mpsc::UnboundedSender<BoxFuture<'static, ()>>,
 }
 
 impl<S> Clone for Addr<S> {
   fn clone(&self) -> Self {
     Addr {
       tx: self.tx.clone(),
-      spawn_tx: self.spawn_tx.clone(),
     }
   }
 }
@@ -140,14 +135,13 @@ impl<S> Addr<S> {
 
 pub struct Context<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
-  spawn_tx: mpsc::UnboundedSender<BoxFuture<'static, ()>>,
+  scope: SpawnScopeHandle,
 }
 
 impl<S> Context<S> {
   pub fn addr(&self) -> Addr<S> {
     Addr {
       tx: self.tx.clone(),
-      spawn_tx: self.spawn_tx.clone(),
     }
   }
 
@@ -157,7 +151,7 @@ impl<S> Context<S> {
   where
     F: Future<Output = ()> + Send + 'static,
   {
-    self.spawn_tx.send(f.boxed()).ok();
+    self.scope.spawn(f);
   }
 }
 
@@ -165,7 +159,6 @@ impl<S> Context<S> {
 pub struct Container<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
   scope: SpawnScope,
-  spawn_tx: mpsc::UnboundedSender<BoxFuture<'static, ()>>,
 }
 
 impl<S> Container<S>
@@ -175,29 +168,22 @@ where
   pub fn new(initial_state: S) -> Self {
     let scope = SpawnScope::new();
     let (tx, mut rx) = mpsc::channel(8);
-    let (spawn_tx, mut spawn_rx) = mpsc::unbounded_channel();
 
     tokio::spawn({
-      let mut scope = scope.handle();
       let mut ctx = Context {
         tx: tx.clone(),
-        spawn_tx: spawn_tx.clone(),
+        scope: scope.handle(),
       };
       async move {
         let mut state = initial_state;
-        let mut tasks = FuturesUnordered::new();
-        tasks.push(futures::future::pending().boxed());
-
         state.started(&mut ctx).await;
 
         loop {
           tokio::select! {
-            _ = scope.left() => {
-              drop(tasks);
+            _ = ctx.scope.left() => {
               state.stopped().await;
               break;
             }
-            _ = tasks.next() => {}
             Some(item) = rx.recv() => {
               match item {
                 ContainerMessage::Item(mut item) => {
@@ -209,9 +195,6 @@ where
                 }
               }
             }
-            Some(f) = spawn_rx.recv() => {
-              tasks.push(f);
-            }
           }
         }
       }
@@ -220,14 +203,12 @@ where
     Self {
       tx,
       scope,
-      spawn_tx,
     }
   }
 
   pub fn addr(&self) -> Addr<S> {
     Addr {
       tx: self.tx.clone(),
-      spawn_tx: self.spawn_tx.clone(),
     }
   }
 
@@ -245,7 +226,7 @@ where
   where
     F: Future<Output = ()> + Send + 'static,
   {
-    self.spawn_tx.send(f.boxed()).ok();
+    self.scope.spawn(f);
   }
 
   pub async fn into_state(mut self) -> Result<S> {
