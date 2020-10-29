@@ -1,5 +1,7 @@
 pub mod error;
 pub mod reply;
+pub mod service;
+
 use error::{Error, Result};
 
 use flo_task::{SpawnScope, SpawnScopeHandle};
@@ -8,8 +10,10 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::Sender;
 
-pub use async_trait::async_trait;
 use std::sync::Arc;
+
+pub use async_trait::async_trait;
+pub use service::{Registry, Service, Deferred};
 
 #[async_trait]
 pub trait Actor: Send + Sized + 'static {
