@@ -9,6 +9,7 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::Sender;
 
 pub use async_trait::async_trait;
+use std::sync::Arc;
 
 #[async_trait]
 pub trait Actor: Send + Sized + 'static {
@@ -32,7 +33,15 @@ where
 }
 
 pub struct Recipient<M> {
-  tx: Box<dyn MessageSender<M>>,
+  tx: Arc<dyn MessageSender<M>>,
+}
+
+impl<M> Clone for Recipient<M> {
+  fn clone(&self) -> Self {
+    Self {
+      tx: self.tx.clone()
+    }
+  }
 }
 
 impl<M> Recipient<M>
@@ -121,7 +130,7 @@ impl<S> Addr<S> {
     S: Handler<M> + 'static,
     M: Message,
   {
-    Recipient { tx: Box::new(self) }
+    Recipient { tx: Arc::new(self) }
   }
 
   pub async fn send<M>(&self, message: M) -> Result<M::Result>
