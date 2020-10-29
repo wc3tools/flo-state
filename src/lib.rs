@@ -48,7 +48,7 @@ where
 trait MessageSender<M>
 where
   M: Message,
-  Self: Send
+  Self: Send + Sync
 {
   async fn send(&self, message: M) -> Result<M::Result>;
 }
