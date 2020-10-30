@@ -1,9 +1,9 @@
-use std::future::Future;
-use std::task;
 use futures::task::Context;
-use std::pin::Pin;
-use tokio::sync::oneshot;
 use futures::FutureExt;
+use std::future::Future;
+use std::pin::Pin;
+use std::task;
+use tokio::sync::oneshot;
 
 pub struct FutureReply<T>(oneshot::Receiver<T>);
 

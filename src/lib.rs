@@ -1,6 +1,6 @@
 pub mod error;
+pub mod registry;
 pub mod reply;
-pub mod service;
 
 use error::{Error, Result};
 
@@ -13,7 +13,7 @@ use tokio::sync::oneshot::Sender;
 use std::sync::Arc;
 
 pub use async_trait::async_trait;
-pub use service::{Registry, Service, Deferred};
+pub use registry::{Deferred, Registry, RegistryError, RegistryRef, Service};
 
 #[async_trait]
 pub trait Actor: Send + Sized + 'static {
@@ -43,7 +43,7 @@ pub struct Recipient<M> {
 impl<M> Clone for Recipient<M> {
   fn clone(&self) -> Self {
     Self {
-      tx: self.tx.clone()
+      tx: self.tx.clone(),
     }
   }
 }
@@ -61,7 +61,7 @@ where
 trait MessageSender<M>
 where
   M: Message,
-  Self: Send + Sync
+  Self: Send + Sync,
 {
   async fn send(&self, message: M) -> Result<M::Result>;
 }
@@ -213,10 +213,7 @@ where
       }
     });
 
-    Self {
-      tx,
-      scope,
-    }
+    Self { tx, scope }
   }
 
   pub fn addr(&self) -> Addr<S> {
