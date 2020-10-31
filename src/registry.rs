@@ -14,40 +14,54 @@ pub enum RegistryError {
   RegistryGone,
 }
 
-type Map = HashMap<TypeId, Box<dyn Any + Send + Sync>>;
-
 #[derive(Debug)]
-pub struct Registry {
-  map: Arc<Mutex<Map>>,
+struct State<D> {
+  data: D,
+  map: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
-impl Registry {
-  pub fn new() -> Self {
-    Registry {
-      map: Arc::new(Mutex::new(HashMap::new())),
+#[derive(Debug)]
+pub struct Registry<D = ()> {
+  state: Arc<Mutex<State<D>>>,
+}
+
+impl<D> Registry<D> {
+  pub fn new() -> Self
+  where D: Default
+  {
+    Self::with_data(Default::default())
+  }
+
+  pub fn with_data(data: D) -> Self {
+    Self {
+      state: Arc::new(Mutex::new(State {
+        data,
+        map: HashMap::new()
+      })),
     }
   }
 }
 
-pub struct RegistryRef {
-  r: Weak<Mutex<Map>>,
-  map: OwnedMutexGuard<Map>,
+pub struct RegistryRef<D = ()> {
+  r: Weak<Mutex<State<D>>>,
+  guard: OwnedMutexGuard<State<D>>,
 }
 
-impl RegistryRef {
-  pub fn deferred<S>(&self) -> Deferred<S>
+impl<D> RegistryRef<D> {
+  pub fn deferred<S>(&self) -> Deferred<S, D>
   where
-    S: Service,
+    S: Service<D>,
   {
     Deferred::new(self.r.clone())
   }
 
   pub async fn resolve<S>(&mut self) -> Result<Addr<S>, S::Error>
   where
-    S: Service,
+    S: Service<D>,
   {
     let type_id = TypeId::of::<S>();
     if let Some(addr) = self
+      .guard
       .map
       .get(&type_id)
       .map(|v| v.downcast_ref::<Container<S>>().unwrap().addr())
@@ -56,50 +70,54 @@ impl RegistryRef {
     }
     let container = S::create(self).await?.start();
     let addr = container.addr();
-    self.map.insert(type_id, Box::new(container));
+    self.guard.map.insert(type_id, Box::new(container));
     Ok(addr)
+  }
+
+  pub fn data(&self) -> &D {
+    &self.guard.data
   }
 }
 
 #[async_trait]
-pub trait Service: Actor {
+pub trait Service<D = ()>: Actor {
   type Error: From<RegistryError>;
-  async fn create(registry: &mut RegistryRef) -> Result<Self, Self::Error>;
+  async fn create(registry: &mut RegistryRef<D>) -> Result<Self, Self::Error>;
 }
 
-impl Registry {
-  pub fn deferred<S>(&self) -> Deferred<S>
+impl<D> Registry<D> {
+  pub fn deferred<S>(&self) -> Deferred<S, D>
   where
-    S: Service,
+    S: Service<D>,
   {
-    Deferred::new(Arc::downgrade(&self.map))
+    Deferred::new(Arc::downgrade(&self.state))
   }
 
   pub async fn resolve<S>(&self) -> Result<Addr<S>, S::Error>
   where
-    S: Service,
+    S: Service<D>,
   {
-    let guard = self.map.clone().lock_owned().await;
+    let guard = self.state.clone().lock_owned().await;
     let mut r = RegistryRef {
-      r: Arc::downgrade(&self.map),
-      map: guard,
+      r: Arc::downgrade(&self.state),
+      guard: guard,
     };
     r.resolve().await
   }
 }
 
 #[derive(Debug)]
-pub struct Deferred<S> {
-  r: Weak<Mutex<Map>>,
+pub struct Deferred<S, D = ()> {
+  r: Weak<Mutex<State<D>>>,
   resolved: Option<Addr<S>>,
   _phantom: PhantomData<S>,
 }
 
-impl<S> Deferred<S>
+impl<S, D> Deferred<S, D>
 where
-  S: Service,
+  S: Service<D>,
 {
-  fn new(r: Weak<Mutex<Map>>) -> Self {
+  fn new(r: Weak<Mutex<State<D>>>) -> Self {
     Self {
       r,
       resolved: None,
@@ -118,7 +136,7 @@ where
       let guard = map.lock_owned().await;
       let mut registry = RegistryRef {
         r: self.r.clone(),
-        map: guard,
+        guard: guard,
       };
       let addr = registry.resolve::<S>().await?;
       self.resolved = Some(addr.clone());
@@ -127,7 +145,7 @@ where
   }
 }
 
-impl<S> Clone for Deferred<S> {
+impl<S, D> Clone for Deferred<S, D> {
   fn clone(&self) -> Self {
     Self {
       r: self.r.clone(),
@@ -146,13 +164,17 @@ mod test {
   async fn test_registry() {
     use once_cell::sync::OnceCell;
 
+    struct Data {
+      id: i32
+    }
+
     struct Dep;
     impl Actor for Dep {}
     #[async_trait]
-    impl Service for Dep {
+    impl Service<Data> for Dep {
       type Error = registry::RegistryError;
 
-      async fn create(_: &mut RegistryRef) -> Result<Self, Self::Error> {
+      async fn create(_: &mut RegistryRef<Data>) -> Result<Self, Self::Error> {
         static CREATED: OnceCell<bool> = OnceCell::new();
 
         CREATED.set(true).unwrap();
@@ -162,7 +184,7 @@ mod test {
     }
 
     struct Number {
-      dep_deferred: Deferred<Dep>,
+      dep_deferred: Deferred<Dep, Data>,
       value: i32,
     }
     impl Actor for Number {}
@@ -200,11 +222,14 @@ mod test {
     }
 
     #[async_trait]
-    impl Service for Number {
+    impl Service<Data> for Number {
       type Error = registry::RegistryError;
 
-      async fn create(registry: &mut RegistryRef) -> Result<Self, Self::Error> {
+      async fn create(registry: &mut RegistryRef<Data>) -> Result<Self, Self::Error> {
         let _dep = registry.resolve::<Dep>().await?;
+
+        assert_eq!(registry.data().id, 42);
+
         Ok(Number {
           dep_deferred: registry.deferred(),
           value: 0,
@@ -212,7 +237,9 @@ mod test {
       }
     }
 
-    let registry = Registry::new();
+    let registry = Registry::with_data(Data {
+      id: 42
+    });
     registry
       .resolve::<Number>()
       .await
