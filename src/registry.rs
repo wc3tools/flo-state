@@ -27,7 +27,8 @@ pub struct Registry<D = ()> {
 
 impl<D> Registry<D> {
   pub fn new() -> Self
-  where D: Default
+  where
+    D: Default,
   {
     Self::with_data(Default::default())
   }
@@ -36,7 +37,7 @@ impl<D> Registry<D> {
     Self {
       state: Arc::new(Mutex::new(State {
         data,
-        map: HashMap::new()
+        map: HashMap::new(),
       })),
     }
   }
@@ -165,7 +166,7 @@ mod test {
     use once_cell::sync::OnceCell;
 
     struct Data {
-      id: i32
+      id: i32,
     }
 
     struct Dep;
@@ -237,9 +238,7 @@ mod test {
       }
     }
 
-    let registry = Registry::with_data(Data {
-      id: 42
-    });
+    let registry = Registry::with_data(Data { id: 42 });
     registry
       .resolve::<Number>()
       .await

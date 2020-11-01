@@ -1,19 +1,19 @@
 pub mod error;
+pub mod mock;
 pub mod registry;
 pub mod reply;
 
-use error::{Error, Result};
+pub use async_trait::async_trait;
+pub use registry::{Deferred, Registry, RegistryError, RegistryRef, Service};
 
+use crate::mock::MockMessage;
+use error::{Error, Result};
 use flo_task::{SpawnScope, SpawnScopeHandle};
 use std::future::Future;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::Sender;
-
-use std::sync::Arc;
-
-pub use async_trait::async_trait;
-pub use registry::{Deferred, Registry, RegistryError, RegistryRef, Service};
 
 #[async_trait]
 pub trait Actor: Send + Sized + 'static {
@@ -82,7 +82,7 @@ where
   M: Message,
 {
   message: M,
-  tx: Sender<M::Result>,
+  tx: ItemReplySender<M::Result>,
 }
 
 impl<M> Item<M>
@@ -97,8 +97,11 @@ where
   }
 }
 
+type ItemReplySender<T> = Sender<T>;
+
 #[async_trait]
 trait ItemObj<S>: Send + 'static {
+  fn as_mock_message(&mut self) -> MockMessage;
   async fn handle(&mut self, state: &mut S, ctx: &mut Context<S>);
 }
 
@@ -108,6 +111,14 @@ where
   S: Handler<M>,
   M: Message,
 {
+  fn as_mock_message(&mut self) -> MockMessage {
+    let Item { message, tx } = self.take().expect("item already consumed");
+    MockMessage {
+      message: Box::new(message),
+      tx: Box::new(Some(tx)),
+    }
+  }
+
   async fn handle(&mut self, state: &mut S, ctx: &mut Context<S>) {
     if let Some(item) = self.take() {
       item.handle(state, ctx).await;
