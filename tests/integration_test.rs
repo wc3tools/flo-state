@@ -17,7 +17,7 @@ async fn test_send() {
   let value = addr.send(GetValue).await.unwrap();
   assert_eq!(value, -10);
 
-  let state = container.into_state().await.unwrap();
+  let state = container.shutdown().await.unwrap();
   assert_eq!(state.value, -10)
 }
 

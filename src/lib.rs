@@ -200,6 +200,7 @@ where
       };
       async move {
         let mut state = initial_state;
+
         state.started(&mut ctx).await;
 
         loop {
@@ -214,6 +215,18 @@ where
                   item.handle(&mut state, &mut ctx).await;
                 }
                 ContainerMessage::Terminate(tx) => {
+                  rx.close();
+
+                  // drain messages
+                  while let Ok(item) = rx.try_recv() {
+                    match item {
+                      ContainerMessage::Item(mut item) => {
+                        item.handle(&mut state, &mut ctx).await;
+                      }
+                      ContainerMessage::Terminate(_) => unreachable!(),
+                    }
+                  }
+
                   tx.send(state).ok();
                   break;
                 }
@@ -250,7 +263,7 @@ where
     self.scope.spawn(f);
   }
 
-  pub async fn into_state(mut self) -> Result<S> {
+  pub async fn shutdown(mut self) -> Result<S> {
     let (tx, rx) = oneshot::channel();
     self
       .tx
