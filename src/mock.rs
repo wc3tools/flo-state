@@ -2,13 +2,15 @@ use crate::{
   Addr, ContainerMessage, Handler, ItemReplySender,
   Message,
 };
-use futures::future::{abortable, AbortHandle};
+use futures::future::{abortable, AbortHandle, BoxFuture};
+use futures::FutureExt;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::future::Future;
 use tokio::sync::mpsc;
 
-type BoxedHandler = Box<dyn FnMut(MockMessage) + Send>;
+type BoxedHandler = Box<dyn FnMut(MockMessage) -> BoxFuture<'static, ()> + Send>;
 
 pub struct Mock<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
@@ -52,18 +54,22 @@ impl<S> MockBuilder<S> {
     }
   }
 
-  pub fn handle<M, F>(mut self, mut f: F) -> Self
+  pub fn handle<M, F, R>(mut self, mut f: F) -> Self
   where
-    M: Message,
+    M: Message + Sync,
     S: Handler<M>,
-    F: FnMut(&M) -> M::Result + Send + 'static,
+    F: FnMut(&M) -> R + Send + 'static,
+    R: Future<Output = M::Result> + Send + 'static
   {
     self.handler_map.insert(
       TypeId::of::<M>(),
       Box::new(move |MockMessage { message, mut tx }| {
         let message = message.downcast_ref::<M>().unwrap();
         let tx = tx.downcast_mut::<Option<ItemReplySender<M::Result>>>().unwrap().take().unwrap();
-        tx.send(f(message)).ok();
+        let task = f(message);
+        async move {
+          tx.send(task.await).ok();
+        }.boxed()
       }),
     );
     self
@@ -84,7 +90,7 @@ impl<S> MockBuilder<S> {
             let mock_message = boxed.as_mock_message();
             let type_id = mock_message.message.as_ref().type_id();
             match handler_map.get_mut(&type_id) {
-              Some(handler) => handler(mock_message),
+              Some(handler) => handler(mock_message).await,
               None => panic!("message mock handler not provided: {:?}", type_id),
             }
           }
@@ -132,7 +138,9 @@ mod test {
     let mut value = 41;
     let mock = Mock::<TestActor>::builder().handle(move |_: &TestMessage| {
       value += 1;
-      value
+      async move {
+        value
+      }
     }).build();
 
     assert_eq!(mock.addr().send(TestMessage).await.unwrap(), 42);
