@@ -2,19 +2,21 @@ use crate::{
   Addr, ContainerMessage, Handler, ItemReplySender,
   Message,
 };
-use futures::future::{abortable, AbortHandle, BoxFuture};
+use futures::future::{abortable, AbortHandle, BoxFuture, Aborted};
 use futures::FutureExt;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::future::Future;
 use tokio::sync::mpsc;
+use tokio::task::{JoinHandle, JoinError};
 
 type BoxedHandler = Box<dyn FnMut(MockMessage) -> BoxFuture<'static, ()> + Send>;
 
 pub struct Mock<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
   abort_handle: AbortHandle,
+  join_handle: Option<JoinHandle<Result<(), Aborted>>>,
   _t: PhantomData<S>,
 }
 
@@ -28,11 +30,25 @@ impl<S> Mock<S> {
       tx: self.tx.clone(),
     }
   }
+
+  pub async fn shutdown(&mut self) -> Result<(), JoinError> {
+    use tokio::sync::oneshot::channel;
+
+    if let Some(handle) = self.join_handle.take() {
+      let (tx, _rx) = channel();
+      self.tx.send(ContainerMessage::Terminate(tx)).await.ok();
+      handle.await.map(|_| ())
+    } else {
+      Ok(())
+    }
+  }
 }
 
 impl<S> Drop for Mock<S> {
   fn drop(&mut self) {
-    self.abort_handle.abort()
+    if self.join_handle.is_some() {
+      self.abort_handle.abort();
+    }
   }
 }
 
@@ -101,16 +117,17 @@ impl<S> MockBuilder<S> {
               None => panic!("message mock handler not provided: {:?}", type_id),
             }
           }
-          ContainerMessage::Terminate(_) => unreachable!(),
+          ContainerMessage::Terminate(_) => {
+            break
+          },
         }
       }
     });
 
-    tokio::spawn(task);
-
     Mock {
       tx,
       abort_handle,
+      join_handle: tokio::spawn(task).into(),
       _t: PhantomData,
     }
   }
@@ -154,5 +171,27 @@ mod test {
     assert_eq!(mock.addr().send(TestMessage).await.unwrap(), 43);
     assert_eq!(mock.addr().send(TestMessage).await.unwrap(), 44);
     assert_eq!(mock.addr().send(TestMessage).await.unwrap(), 45);
+  }
+
+  #[tokio::test]
+  async fn test_mock_panic() {
+    struct A;
+    impl Actor for A {}
+    struct M;
+    impl Message for M {
+      type Result = ();
+    }
+    #[async_trait]
+    impl Handler<M> for A {
+      async fn handle(&mut self, _ctx: &mut Context<Self>, _message: M) -> <M as Message>::Result {
+        ()
+      }
+    }
+
+    let mut mock = Mock::<A>::builder().build();
+
+    mock.addr().send(M).await.unwrap();
+
+    mock.shutdown().await.unwrap();
   }
 }
