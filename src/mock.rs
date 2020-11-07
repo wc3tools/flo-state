@@ -38,7 +38,7 @@ impl<S> Drop for Mock<S> {
 
 pub(crate) struct MockMessage {
   pub(crate) message: Box<dyn Any + Send>,
-  pub(crate) tx: Box<dyn Any + Send>,
+  pub(crate) tx: Option<Box<dyn Any + Send>>,
 }
 
 pub struct MockBuilder<S> {
@@ -63,13 +63,20 @@ impl<S> MockBuilder<S> {
   {
     self.handler_map.insert(
       TypeId::of::<M>(),
-      Box::new(move |MockMessage { message, mut tx }| {
+      Box::new(move |MockMessage { message, tx }| {
         let message = message.downcast_ref::<M>().unwrap();
-        let tx = tx.downcast_mut::<Option<ItemReplySender<M::Result>>>().unwrap().take().unwrap();
-        let task = f(message);
-        async move {
-          tx.send(task.await).ok();
-        }.boxed()
+        if let Some(mut tx) = tx {
+          let tx = tx.downcast_mut::<Option<ItemReplySender<M::Result>>>().unwrap().take().unwrap();
+          let task = f(message);
+          async move {
+            tx.send(task.await).ok();
+          }.boxed()
+        } else {
+          let task = f(message);
+          async move {
+            task.await;
+          }.boxed()
+        }
       }),
     );
     self

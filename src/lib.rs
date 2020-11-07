@@ -77,26 +77,6 @@ where
   }
 }
 
-struct Item<M>
-where
-  M: Message,
-{
-  message: M,
-  tx: ItemReplySender<M::Result>,
-}
-
-impl<M> Item<M>
-where
-  M: Message,
-{
-  async fn handle<S>(self, state: &mut S, ctx: &mut Context<S>)
-  where
-    S: Handler<M>,
-  {
-    self.tx.send(state.handle(ctx, self.message).await).ok();
-  }
-}
-
 type ItemReplySender<T> = Sender<T>;
 
 #[async_trait]
@@ -105,23 +85,70 @@ trait ItemObj<S>: Send + 'static {
   async fn handle(&mut self, state: &mut S, ctx: &mut Context<S>);
 }
 
+struct MsgItem<M>
+  where
+    M: Message,
+{
+  message: M,
+  tx: ItemReplySender<M::Result>,
+}
+
+impl<M> MsgItem<M>
+  where
+    M: Message,
+{
+  async fn handle<S>(self, state: &mut S, ctx: &mut Context<S>)
+    where
+      S: Handler<M>,
+  {
+    self.tx.send(state.handle(ctx, self.message).await).ok();
+  }
+}
+
 #[async_trait]
-impl<S, M> ItemObj<S> for Option<Item<M>>
-where
-  S: Handler<M>,
-  M: Message,
+impl<S, M> ItemObj<S> for Option<MsgItem<M>>
+  where
+    S: Handler<M>,
+    M: Message,
 {
   fn as_mock_message(&mut self) -> MockMessage {
-    let Item { message, tx } = self.take().expect("item already consumed");
+    let MsgItem { message, tx } = self.take().expect("item already consumed");
     MockMessage {
       message: Box::new(message),
-      tx: Box::new(Some(tx)),
+      tx: Some(Box::new(Some(tx))),
     }
   }
 
   async fn handle(&mut self, state: &mut S, ctx: &mut Context<S>) {
     if let Some(item) = self.take() {
       item.handle(state, ctx).await;
+    }
+  }
+}
+
+struct NotifyItem<M>
+  where M: Message
+{
+  message: M,
+}
+
+#[async_trait]
+impl<S, M> ItemObj<S> for Option<NotifyItem<M>>
+  where
+    S: Handler<M>,
+    M: Message<Result = ()>,
+{
+  fn as_mock_message(&mut self) -> MockMessage {
+    let NotifyItem { message} = self.take().expect("item already consumed");
+    MockMessage {
+      message: Box::new(message),
+      tx: None,
+    }
+  }
+
+  async fn handle(&mut self, state: &mut S, ctx: &mut Context<S>) {
+    if let Some(item) = self.take() {
+      state.handle(ctx, item.message).await;
     }
   }
 }
@@ -148,12 +175,22 @@ impl<S> Addr<S> {
     Recipient { tx: Arc::new(self) }
   }
 
+  /// Sends a message to the actor and wait for the result
   pub async fn send<M>(&self, message: M) -> Result<M::Result>
   where
     M: Message + Send + 'static,
     S: Handler<M>,
   {
     send(&self.tx, message).await
+  }
+
+  /// Sends a message to the actor without waiting for the result
+  pub async fn notify<M>(&self, message: M) -> Result<()>
+    where
+      M: Message<Result = ()> + Send + 'static,
+      S: Handler<M>,
+  {
+    notify(&self.tx, message).await
   }
 }
 
@@ -246,12 +283,22 @@ where
     }
   }
 
+  /// Sends a message to the actor and wait for the result
   pub async fn send<M>(&self, message: M) -> Result<M::Result>
   where
     M: Message + Send + 'static,
     S: Handler<M>,
   {
     send(&self.tx, message).await
+  }
+
+  /// Sends a message to the actor without waiting for the result
+  pub async fn notify<M>(&self, message: M) -> Result<()>
+  where
+    M: Message<Result = ()> + Send + 'static,
+    S: Handler<M>,
+  {
+    notify(&self.tx, message).await
   }
 
   /// Spawns a future into the container.
@@ -280,7 +327,7 @@ where
   M: Message + Send + 'static,
 {
   let (reply_tx, reply_rx) = oneshot::channel();
-  let boxed = Box::new(Some(Item {
+  let boxed = Box::new(Some(MsgItem {
     message,
     tx: reply_tx,
   }));
@@ -290,6 +337,21 @@ where
     .map_err(|_| Error::WorkerGone)?;
   let res = reply_rx.await.map_err(|_| Error::WorkerGone)?;
   Ok(res)
+}
+
+async fn notify<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M) -> Result<()>
+  where
+    S: Handler<M>,
+    M: Message<Result = ()> + Send + 'static,
+{
+  let boxed = Box::new(Some(NotifyItem {
+    message,
+  }));
+  tx.clone()
+    .send(ContainerMessage::Item(boxed))
+    .await
+    .map_err(|_| Error::WorkerGone)?;
+  Ok(())
 }
 
 enum ContainerMessage<S> {

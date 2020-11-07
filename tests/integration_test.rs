@@ -83,6 +83,44 @@ async fn test_callbacks() {
   rx_stopped.await.unwrap();
 }
 
+#[tokio::test]
+async fn test_notify() {
+  use tokio::sync::Notify;
+  use std::sync::Arc;
+
+  struct A;
+  impl Actor for A {}
+
+  struct M(usize, Addr<A>, Arc<Notify>);
+  impl Message for M {
+    type Result = ();
+  }
+
+  #[async_trait]
+  impl Handler<M> for A {
+    async fn handle(&mut self, ctx: &mut Context<Self>, M(n, reply_addr, done): M) -> <M as Message>::Result {
+      if n < 10 {
+        reply_addr.notify(M(n + 1, ctx.addr(), done)).await.unwrap();
+      } else {
+        done.notify();
+      }
+    }
+  }
+
+  let done = Arc::new(Notify::new());
+
+  let a1 = A.start();
+  let a2 = A.start();
+
+  let m = M(0, a2.addr(), done.clone());
+  a1.notify(m).await.unwrap();
+
+  done.notified().await;
+
+  a1.shutdown().await.unwrap();
+  a2.shutdown().await.unwrap();
+}
+
 struct State {
   value: i64,
 }
