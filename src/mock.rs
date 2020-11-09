@@ -74,13 +74,13 @@ impl<S> MockBuilder<S> {
   where
     M: Message + Sync,
     S: Handler<M>,
-    F: FnMut(&M) -> R + Send + 'static,
+    F: FnMut(M) -> R + Send + 'static,
     R: Future<Output = M::Result> + Send + 'static
   {
     self.handler_map.insert(
-      TypeId::of::<M>(),
-      Box::new(move |MockMessage { message, tx }| {
-        let message = message.downcast_ref::<M>().unwrap();
+      TypeId::of::<Option<M>>(),
+      Box::new(move |MockMessage { mut message, tx }| {
+        let message = message.downcast_mut::<Option<M>>().unwrap().take().unwrap();
         if let Some(mut tx) = tx {
           let tx = tx.downcast_mut::<Option<ItemReplySender<M::Result>>>().unwrap().take().unwrap();
           let task = f(message);
@@ -160,7 +160,7 @@ mod test {
     assert_eq!(actor.send(TestMessage).await.unwrap(), 0);
 
     let mut value = 41;
-    let mock = Mock::<TestActor>::builder().handle(move |_: &TestMessage| {
+    let mock = Mock::<TestActor>::builder().handle(move |_: TestMessage| {
       value += 1;
       async move {
         value
@@ -174,6 +174,7 @@ mod test {
   }
 
   #[tokio::test]
+  #[should_panic]
   async fn test_mock_panic() {
     struct A;
     impl Actor for A {}

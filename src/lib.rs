@@ -114,7 +114,7 @@ impl<S, M> ItemObj<S> for Option<MsgItem<M>>
   fn as_mock_message(&mut self) -> MockMessage {
     let MsgItem { message, tx } = self.take().expect("item already consumed");
     MockMessage {
-      message: Box::new(message),
+      message: Box::new(Some(message)),
       tx: Some(Box::new(Some(tx))),
     }
   }
@@ -141,7 +141,7 @@ impl<S, M> ItemObj<S> for Option<NotifyItem<M>>
   fn as_mock_message(&mut self) -> MockMessage {
     let NotifyItem { message} = self.take().expect("item already consumed");
     MockMessage {
-      message: Box::new(message),
+      message: Box::new(Some(message)),
       tx: None,
     }
   }
