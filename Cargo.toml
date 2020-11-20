@@ -5,9 +5,10 @@ authors = ["Flux Xu <fluxxu@gmail.com>"]
 edition = "2018"
 description = "Lightweight actor library."
 license = "MIT"
+repository = "https://github.com/wc3tools/flo-state.git"
 
 [dependencies]
-flo-task = { git = "https://github.com/wc3tools/flo-task.git" }
+flo-task = "0.1"
 
 tokio = { version = "0.2", features = ["sync", "macros", "rt-threaded"] }
 futures = "0.3"
