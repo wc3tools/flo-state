@@ -3,6 +3,8 @@ name = "flo-state"
 version = "0.5.0"
 authors = ["Flux Xu <fluxxu@gmail.com>"]
 edition = "2018"
+description = "Lightweight actor library."
+license = "MIT"
 
 [dependencies]
 flo-task = { git = "https://github.com/wc3tools/flo-task.git" }
