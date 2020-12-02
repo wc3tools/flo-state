@@ -101,7 +101,7 @@ impl<D> Registry<D> {
     let guard = self.state.clone().lock_owned().await;
     let mut r = RegistryRef {
       r: Arc::downgrade(&self.state),
-      guard: guard,
+      guard,
     };
     r.resolve().await
   }
@@ -137,7 +137,7 @@ where
       let guard = map.lock_owned().await;
       let mut registry = RegistryRef {
         r: self.r.clone(),
-        guard: guard,
+        guard,
       };
       let addr = registry.resolve::<S>().await?;
       self.resolved = Some(addr.clone());
