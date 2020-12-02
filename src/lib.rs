@@ -10,10 +10,12 @@ use crate::mock::MockMessage;
 use error::{Error, Result};
 use flo_task::{SpawnScope, SpawnScopeHandle};
 use std::future::Future;
+use std::time::Duration;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::Sender;
+use tokio::sync::mpsc::error::SendTimeoutError;
 
 #[async_trait]
 pub trait Actor: Send + Sized + 'static {
@@ -55,6 +57,9 @@ where
   pub async fn send(&self, message: M) -> Result<M::Result> {
     self.tx.send(message).await
   }
+  pub async fn send_timeout(&self, timeout: Duration, message: M) -> Result<M::Result> {
+    self.tx.send_timeout(timeout, message).await
+  }
 }
 
 #[async_trait]
@@ -64,6 +69,7 @@ where
   Self: Send + Sync,
 {
   async fn send(&self, message: M) -> Result<M::Result>;
+  async fn send_timeout(&self, timeout: Duration, message: M) -> Result<M::Result>;
 }
 
 #[async_trait]
@@ -73,7 +79,10 @@ where
   M: Message,
 {
   async fn send(&self, message: M) -> Result<M::Result> {
-    self.send(message).await
+    Addr::send(self, message).await
+  }
+  async fn send_timeout(&self, timeout: Duration, message: M) -> Result<M::Result> {
+    Addr::send_timeout(self, timeout, message).await
   }
 }
 
@@ -181,7 +190,16 @@ impl<S> Addr<S> {
     M: Message + Send + 'static,
     S: Handler<M>,
   {
-    send(&self.tx, message).await
+    send(&self.tx, message, None).await
+  }
+
+  /// Sends a message to the actor and wait for the result, but only for a limited time.
+  pub async fn send_timeout<M>(&self, timeout: Duration, message: M) -> Result<M::Result>
+    where
+      M: Message + Send + 'static,
+      S: Handler<M>,
+  {
+    send(&self.tx, message, Some(timeout)).await
   }
 
   /// Sends a message to the actor without waiting for the result
@@ -190,7 +208,16 @@ impl<S> Addr<S> {
       M: Message<Result = ()> + Send + 'static,
       S: Handler<M>,
   {
-    notify(&self.tx, message).await
+    notify(&self.tx, message, None).await
+  }
+
+  /// Sends a message to the actor without waiting for the result, but only for a limited time.
+  pub async fn notify_timeout<M>(&self, timeout: Duration, message: M) -> Result<()>
+    where
+      M: Message<Result = ()> + Send + 'static,
+      S: Handler<M>,
+  {
+    notify(&self.tx, message, Some(timeout)).await
   }
 }
 
@@ -289,7 +316,16 @@ where
     M: Message + Send + 'static,
     S: Handler<M>,
   {
-    send(&self.tx, message).await
+    send(&self.tx, message, None).await
+  }
+
+  /// Sends a message to the actor and wait for the result, but only for a limited time.
+  pub async fn send_timeout<M>(&self, timeout: Duration, message: M) -> Result<M::Result>
+    where
+      M: Message + Send + 'static,
+      S: Handler<M>,
+  {
+    send(&self.tx, message, Some(timeout)).await
   }
 
   /// Sends a message to the actor without waiting for the result
@@ -298,8 +334,18 @@ where
     M: Message<Result = ()> + Send + 'static,
     S: Handler<M>,
   {
-    notify(&self.tx, message).await
+    notify(&self.tx, message, None).await
   }
+
+  /// Sends a message to the actor without waiting for the result, but only for a limited time.
+  pub async fn notify_timeout<M>(&self, timeout: Duration, message: M) -> Result<()>
+    where
+      M: Message<Result = ()> + Send + 'static,
+      S: Handler<M>,
+  {
+    notify(&self.tx, message, Some(timeout)).await
+  }
+
 
   /// Spawns a future into the container.
   /// All futures spawned into the container will be cancelled if the container dropped.
@@ -321,7 +367,7 @@ where
   }
 }
 
-async fn send<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M) -> Result<M::Result>
+async fn send<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M, timeout: Option<Duration>) -> Result<M::Result>
 where
   S: Handler<M>,
   M: Message + Send + 'static,
@@ -331,15 +377,30 @@ where
     message,
     tx: reply_tx,
   }));
-  tx.clone()
-    .send(ContainerMessage::Item(boxed))
-    .await
-    .map_err(|_| Error::WorkerGone)?;
+
+  if let Some(timeout) = timeout {
+    tx.clone()
+      .send_timeout(ContainerMessage::Item(boxed), timeout)
+      .await
+      .map_err(|err| match err {
+        SendTimeoutError::Timeout(_) => {
+          Error::SendTimeout
+        }
+        SendTimeoutError::Closed(_) => {
+          Error::WorkerGone
+        }
+      })?;
+  } else {
+    tx.clone()
+      .send(ContainerMessage::Item(boxed))
+      .await
+      .map_err(|_| Error::WorkerGone)?;
+  }
   let res = reply_rx.await.map_err(|_| Error::WorkerGone)?;
   Ok(res)
 }
 
-async fn notify<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M) -> Result<()>
+async fn notify<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M, timeout: Option<Duration>) -> Result<()>
   where
     S: Handler<M>,
     M: Message<Result = ()> + Send + 'static,
@@ -347,10 +408,24 @@ async fn notify<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M) -> Res
   let boxed = Box::new(Some(NotifyItem {
     message,
   }));
-  tx.clone()
-    .send(ContainerMessage::Item(boxed))
-    .await
-    .map_err(|_| Error::WorkerGone)?;
+  if let Some(timeout) = timeout {
+    tx.clone()
+      .send_timeout(ContainerMessage::Item(boxed), timeout)
+      .await
+      .map_err(|err| match err {
+        SendTimeoutError::Timeout(_) => {
+          Error::SendTimeout
+        }
+        SendTimeoutError::Closed(_) => {
+          Error::WorkerGone
+        }
+      })?;
+  } else {
+    tx.clone()
+      .send(ContainerMessage::Item(boxed))
+      .await
+      .map_err(|_| Error::WorkerGone)?;
+  }
   Ok(())
 }
 
