@@ -10,7 +10,7 @@ use crate::mock::MockMessage;
 use error::{Error, Result};
 use flo_task::{SpawnScope, SpawnScopeHandle};
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -379,6 +379,7 @@ where
   }));
 
   if let Some(timeout) = timeout {
+    let t = Instant::now();
     tx.clone()
       .send_timeout(ContainerMessage::Item(boxed), timeout)
       .await
@@ -390,14 +391,21 @@ where
           Error::WorkerGone
         }
       })?;
+    let timeout = match timeout.checked_sub(Instant::now() - t) {
+      None => return Err(Error::SendTimeout),
+      Some(v) => v
+    };
+    let res = tokio::time::timeout(timeout, reply_rx).await.map_err(|_| Error::SendTimeout)?;
+    let res = res.map_err(|_| Error::WorkerGone)?;
+    Ok(res)
   } else {
     tx.clone()
       .send(ContainerMessage::Item(boxed))
       .await
       .map_err(|_| Error::WorkerGone)?;
+    let res = reply_rx.await.map_err(|_| Error::WorkerGone)?;
+    Ok(res)
   }
-  let res = reply_rx.await.map_err(|_| Error::WorkerGone)?;
-  Ok(res)
 }
 
 async fn notify<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M, timeout: Option<Duration>) -> Result<()>

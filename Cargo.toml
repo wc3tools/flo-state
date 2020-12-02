@@ -1,6 +1,6 @@
 [package]
 name = "flo-state"
-version = "0.6.0"
+version = "0.6.1"
 authors = ["Flux Xu <fluxxu@gmail.com>"]
 edition = "2018"
 description = "Lightweight actor library."
