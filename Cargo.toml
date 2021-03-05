@@ -1,6 +1,6 @@
 [package]
 name = "flo-state"
-version = "0.6.0"
+version = "1.0.0"
 authors = ["Flux Xu <fluxxu@gmail.com>"]
 edition = "2018"
 description = "Lightweight actor library."
@@ -8,13 +8,12 @@ license = "MIT"
 repository = "https://github.com/wc3tools/flo-state.git"
 
 [dependencies]
-flo-task = "0.1"
-
-tokio = { version = "0.2", features = ["sync", "macros", "rt-threaded"] }
+tokio = { version = "1.2", features = ["sync", "macros", "rt-multi-thread", "time"] }
+tokio-util = { version = "0.6.3" }
 futures = "0.3"
 thiserror = "1.0"
 async-trait = "0.1"
 
 [dev-dependencies]
-tokio = { version = "0.2", features = ["sync", "macros", "rt-threaded", "time"] }
+tokio = { version = "1.2", features = ["sync", "macros", "rt-multi-thread", "time"] }
 once_cell = "1.4"

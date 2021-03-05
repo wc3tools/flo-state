@@ -8,21 +8,21 @@ pub use registry::{Deferred, Registry, RegistryError, RegistryRef, Service};
 
 use crate::mock::MockMessage;
 use error::{Error, Result};
-use flo_task::{SpawnScope, SpawnScopeHandle};
 use std::future::Future;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::SendTimeoutError;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::Sender;
-use tokio::sync::mpsc::error::SendTimeoutError;
+use tokio_util::sync::CancellationToken;
 
 #[async_trait]
 pub trait Actor: Send + Sized + 'static {
   async fn started(&mut self, _ctx: &mut Context<Self>) {}
   async fn stopped(self) {}
-  fn start(self) -> Container<Self> {
-    Container::new(self)
+  fn start(self) -> Owner<Self> {
+    Owner::new(self)
   }
 }
 
@@ -95,20 +95,20 @@ trait ItemObj<S>: Send + 'static {
 }
 
 struct MsgItem<M>
-  where
-    M: Message,
+where
+  M: Message,
 {
   message: M,
   tx: ItemReplySender<M::Result>,
 }
 
 impl<M> MsgItem<M>
-  where
-    M: Message,
+where
+  M: Message,
 {
   async fn handle<S>(self, state: &mut S, ctx: &mut Context<S>)
-    where
-      S: Handler<M>,
+  where
+    S: Handler<M>,
   {
     self.tx.send(state.handle(ctx, self.message).await).ok();
   }
@@ -116,9 +116,9 @@ impl<M> MsgItem<M>
 
 #[async_trait]
 impl<S, M> ItemObj<S> for Option<MsgItem<M>>
-  where
-    S: Handler<M>,
-    M: Message,
+where
+  S: Handler<M>,
+  M: Message,
 {
   fn as_mock_message(&mut self) -> MockMessage {
     let MsgItem { message, tx } = self.take().expect("item already consumed");
@@ -136,19 +136,20 @@ impl<S, M> ItemObj<S> for Option<MsgItem<M>>
 }
 
 struct NotifyItem<M>
-  where M: Message
+where
+  M: Message,
 {
   message: M,
 }
 
 #[async_trait]
 impl<S, M> ItemObj<S> for Option<NotifyItem<M>>
-  where
-    S: Handler<M>,
-    M: Message<Result = ()>,
+where
+  S: Handler<M>,
+  M: Message<Result = ()>,
 {
   fn as_mock_message(&mut self) -> MockMessage {
-    let NotifyItem { message} = self.take().expect("item already consumed");
+    let NotifyItem { message } = self.take().expect("item already consumed");
     MockMessage {
       message: Box::new(Some(message)),
       tx: None,
@@ -195,27 +196,27 @@ impl<S> Addr<S> {
 
   /// Sends a message to the actor and wait for the result, but only for a limited time.
   pub async fn send_timeout<M>(&self, timeout: Duration, message: M) -> Result<M::Result>
-    where
-      M: Message + Send + 'static,
-      S: Handler<M>,
+  where
+    M: Message + Send + 'static,
+    S: Handler<M>,
   {
     send(&self.tx, message, Some(timeout)).await
   }
 
   /// Sends a message to the actor without waiting for the result
   pub async fn notify<M>(&self, message: M) -> Result<()>
-    where
-      M: Message<Result = ()> + Send + 'static,
-      S: Handler<M>,
+  where
+    M: Message<Result = ()> + Send + 'static,
+    S: Handler<M>,
   {
     notify(&self.tx, message, None).await
   }
 
   /// Sends a message to the actor without waiting for the result, but only for a limited time.
   pub async fn notify_timeout<M>(&self, timeout: Duration, message: M) -> Result<()>
-    where
-      M: Message<Result = ()> + Send + 'static,
-      S: Handler<M>,
+  where
+    M: Message<Result = ()> + Send + 'static,
+    S: Handler<M>,
   {
     notify(&self.tx, message, Some(timeout)).await
   }
@@ -223,7 +224,7 @@ impl<S> Addr<S> {
 
 pub struct Context<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
-  scope: SpawnScopeHandle,
+  token: CancellationToken,
 }
 
 impl<S> Context<S> {
@@ -233,35 +234,54 @@ impl<S> Context<S> {
     }
   }
 
-  /// Spawns a future into the container.
+  /// Spawns a future into the context.
   /// All futures spawned into the container will be cancelled if the container dropped.
   pub fn spawn<F>(&self, f: F)
   where
     F: Future<Output = ()> + Send + 'static,
   {
-    self.scope.spawn(f);
+    let token = self.token.child_token();
+    tokio::spawn(async move {
+      tokio::select! {
+        _ = token.cancelled() => {}
+        _ = f => {}
+      }
+    });
+  }
+}
+
+impl<S> Drop for Context<S> {
+  fn drop(&mut self) {
+    self.token.cancel();
   }
 }
 
 #[derive(Debug)]
-pub struct Container<S> {
+pub struct Owner<S> {
   tx: mpsc::Sender<ContainerMessage<S>>,
-  scope: SpawnScope,
+  token: CancellationToken,
 }
 
-impl<S> Container<S>
+impl<S> Drop for Owner<S> {
+  fn drop(&mut self) {
+    self.token.cancel();
+  }
+}
+
+impl<S> Owner<S>
 where
   S: Actor,
 {
   pub fn new(initial_state: S) -> Self {
-    let scope = SpawnScope::new();
-    let (tx, mut rx) = mpsc::channel(8);
+    let token = CancellationToken::new();
+    let (tx, mut rx) = mpsc::channel(32);
 
     tokio::spawn({
       let mut ctx = Context {
         tx: tx.clone(),
-        scope: scope.handle(),
+        token: token.child_token(),
       };
+      let token = token.child_token();
       async move {
         let mut state = initial_state;
 
@@ -269,7 +289,7 @@ where
 
         loop {
           tokio::select! {
-            _ = ctx.scope.left() => {
+            _ = token.cancelled() => {
               state.stopped().await;
               break;
             }
@@ -282,7 +302,7 @@ where
                   rx.close();
 
                   // drain messages
-                  while let Ok(item) = rx.try_recv() {
+                  while let Some(item) = rx.recv().await {
                     match item {
                       ContainerMessage::Item(mut item) => {
                         item.handle(&mut state, &mut ctx).await;
@@ -301,7 +321,7 @@ where
       }
     });
 
-    Self { tx, scope }
+    Self { tx, token }
   }
 
   pub fn addr(&self) -> Addr<S> {
@@ -321,9 +341,9 @@ where
 
   /// Sends a message to the actor and wait for the result, but only for a limited time.
   pub async fn send_timeout<M>(&self, timeout: Duration, message: M) -> Result<M::Result>
-    where
-      M: Message + Send + 'static,
-      S: Handler<M>,
+  where
+    M: Message + Send + 'static,
+    S: Handler<M>,
   {
     send(&self.tx, message, Some(timeout)).await
   }
@@ -339,13 +359,12 @@ where
 
   /// Sends a message to the actor without waiting for the result, but only for a limited time.
   pub async fn notify_timeout<M>(&self, timeout: Duration, message: M) -> Result<()>
-    where
-      M: Message<Result = ()> + Send + 'static,
-      S: Handler<M>,
+  where
+    M: Message<Result = ()> + Send + 'static,
+    S: Handler<M>,
   {
     notify(&self.tx, message, Some(timeout)).await
   }
-
 
   /// Spawns a future into the container.
   /// All futures spawned into the container will be cancelled if the container dropped.
@@ -353,10 +372,16 @@ where
   where
     F: Future<Output = ()> + Send + 'static,
   {
-    self.scope.spawn(f);
+    let token = self.token.child_token();
+    tokio::spawn(async move {
+      tokio::select! {
+        _ = token.cancelled() => {}
+        _ = f => {}
+      }
+    });
   }
 
-  pub async fn shutdown(mut self) -> Result<S> {
+  pub async fn shutdown(self) -> Result<S> {
     let (tx, rx) = oneshot::channel();
     self
       .tx
@@ -367,7 +392,11 @@ where
   }
 }
 
-async fn send<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M, timeout: Option<Duration>) -> Result<M::Result>
+async fn send<S, M>(
+  tx: &mpsc::Sender<ContainerMessage<S>>,
+  message: M,
+  timeout: Option<Duration>,
+) -> Result<M::Result>
 where
   S: Handler<M>,
   M: Message + Send + 'static,
@@ -379,20 +408,14 @@ where
   }));
 
   if let Some(timeout) = timeout {
-    tx.clone()
-      .send_timeout(ContainerMessage::Item(boxed), timeout)
+    tx.send_timeout(ContainerMessage::Item(boxed), timeout)
       .await
       .map_err(|err| match err {
-        SendTimeoutError::Timeout(_) => {
-          Error::SendTimeout
-        }
-        SendTimeoutError::Closed(_) => {
-          Error::WorkerGone
-        }
+        SendTimeoutError::Timeout(_) => Error::SendTimeout,
+        SendTimeoutError::Closed(_) => Error::WorkerGone,
       })?;
   } else {
-    tx.clone()
-      .send(ContainerMessage::Item(boxed))
+    tx.send(ContainerMessage::Item(boxed))
       .await
       .map_err(|_| Error::WorkerGone)?;
   }
@@ -400,29 +423,25 @@ where
   Ok(res)
 }
 
-async fn notify<S, M>(tx: &mpsc::Sender<ContainerMessage<S>>, message: M, timeout: Option<Duration>) -> Result<()>
-  where
-    S: Handler<M>,
-    M: Message<Result = ()> + Send + 'static,
+async fn notify<S, M>(
+  tx: &mpsc::Sender<ContainerMessage<S>>,
+  message: M,
+  timeout: Option<Duration>,
+) -> Result<()>
+where
+  S: Handler<M>,
+  M: Message<Result = ()> + Send + 'static,
 {
-  let boxed = Box::new(Some(NotifyItem {
-    message,
-  }));
+  let boxed = Box::new(Some(NotifyItem { message }));
   if let Some(timeout) = timeout {
-    tx.clone()
-      .send_timeout(ContainerMessage::Item(boxed), timeout)
+    tx.send_timeout(ContainerMessage::Item(boxed), timeout)
       .await
       .map_err(|err| match err {
-        SendTimeoutError::Timeout(_) => {
-          Error::SendTimeout
-        }
-        SendTimeoutError::Closed(_) => {
-          Error::WorkerGone
-        }
+        SendTimeoutError::Timeout(_) => Error::SendTimeout,
+        SendTimeoutError::Closed(_) => Error::WorkerGone,
       })?;
   } else {
-    tx.clone()
-      .send(ContainerMessage::Item(boxed))
+    tx.send(ContainerMessage::Item(boxed))
       .await
       .map_err(|_| Error::WorkerGone)?;
   }

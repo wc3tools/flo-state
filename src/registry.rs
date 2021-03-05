@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-use crate::{Actor, Addr, Container};
+use crate::{Actor, Addr, Owner};
 
 #[derive(Error, Debug)]
 pub enum RegistryError {
@@ -65,7 +65,7 @@ impl<D> RegistryRef<D> {
       .guard
       .map
       .get(&type_id)
-      .map(|v| v.downcast_ref::<Container<S>>().unwrap().addr())
+      .map(|v| v.downcast_ref::<Owner<S>>().unwrap().addr())
     {
       return Ok(addr);
     }

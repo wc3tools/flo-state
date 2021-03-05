@@ -3,7 +3,7 @@ use flo_state::*;
 
 #[tokio::test]
 async fn test_send() {
-  let container = Container::new(State { value: 0 });
+  let container = Owner::new(State { value: 0 });
   let addr = container.addr();
 
   for _ in 0..10_usize {
@@ -25,7 +25,7 @@ async fn test_send() {
 async fn test_spawn() {
   use tokio::sync::mpsc::*;
   use tokio::sync::oneshot;
-  let (mut tx, mut rx) = channel::<oneshot::Sender<()>>(1);
+  let (tx, mut rx) = channel::<oneshot::Sender<()>>(1);
 
   let task = async move {
     while let Some(tx) = rx.recv().await {
@@ -33,7 +33,7 @@ async fn test_spawn() {
     }
   };
 
-  let container = Container::new(());
+  let container = Owner::new(());
   container.spawn(task);
 
   for _ in 0..3 {
@@ -43,7 +43,7 @@ async fn test_spawn() {
   }
 
   drop(container);
-  tokio::time::delay_for(std::time::Duration::from_secs(1)).await;
+  tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
   let (t, _r) = oneshot::channel();
   tx.send(t).await.err().unwrap();
@@ -85,8 +85,8 @@ async fn test_callbacks() {
 
 #[tokio::test]
 async fn test_notify() {
-  use tokio::sync::Notify;
   use std::sync::Arc;
+  use tokio::sync::Notify;
 
   struct A;
   impl Actor for A {}
@@ -98,11 +98,15 @@ async fn test_notify() {
 
   #[async_trait]
   impl Handler<M> for A {
-    async fn handle(&mut self, ctx: &mut Context<Self>, M(n, reply_addr, done): M) -> <M as Message>::Result {
+    async fn handle(
+      &mut self,
+      ctx: &mut Context<Self>,
+      M(n, reply_addr, done): M,
+    ) -> <M as Message>::Result {
       if n < 10 {
         reply_addr.notify(M(n + 1, ctx.addr(), done)).await.unwrap();
       } else {
-        done.notify();
+        done.notify_one();
       }
     }
   }
