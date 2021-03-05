@@ -8,9 +8,9 @@ pub use registry::{Deferred, Registry, RegistryError, RegistryRef, Service};
 
 use crate::mock::MockMessage;
 use error::{Error, Result};
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{future::Future, time::Instant};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendTimeoutError;
 use tokio::sync::oneshot;
@@ -408,19 +408,29 @@ where
   }));
 
   if let Some(timeout) = timeout {
+    let t = Instant::now();
     tx.send_timeout(ContainerMessage::Item(boxed), timeout)
       .await
       .map_err(|err| match err {
         SendTimeoutError::Timeout(_) => Error::SendTimeout,
         SendTimeoutError::Closed(_) => Error::WorkerGone,
       })?;
+    let timeout = match timeout.checked_sub(Instant::now() - t) {
+      None => return Err(Error::SendTimeout),
+      Some(v) => v,
+    };
+    let res = tokio::time::timeout(timeout, reply_rx)
+      .await
+      .map_err(|_| Error::SendTimeout)?;
+    let res = res.map_err(|_| Error::WorkerGone)?;
+    Ok(res)
   } else {
     tx.send(ContainerMessage::Item(boxed))
       .await
       .map_err(|_| Error::WorkerGone)?;
+    let res = reply_rx.await.map_err(|_| Error::WorkerGone)?;
+    Ok(res)
   }
-  let res = reply_rx.await.map_err(|_| Error::WorkerGone)?;
-  Ok(res)
 }
 
 async fn notify<S, M>(
