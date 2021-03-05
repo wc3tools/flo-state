@@ -248,6 +248,19 @@ impl<S> Context<S> {
       }
     });
   }
+
+  /// Sends the message msg to self after a specified period of time.
+  pub fn send_later<T>(&self, msg: T, after: Duration)
+  where
+    T: Message<Result = ()>,
+    S: Handler<T> + 'static,
+  {
+    let addr = self.addr();
+    self.spawn(async move {
+      tokio::time::sleep(after).await;
+      addr.send(msg).await.ok();
+    });
+  }
 }
 
 impl<S> Drop for Context<S> {
