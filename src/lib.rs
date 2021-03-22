@@ -8,6 +8,7 @@ pub use registry::{Deferred, Registry, RegistryError, RegistryRef, Service};
 
 use crate::mock::MockMessage;
 use error::{Error, Result};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{future::Future, time::Instant};
@@ -286,55 +287,11 @@ where
   S: Actor,
 {
   pub fn new(initial_state: S) -> Self {
-    let token = CancellationToken::new();
-    let (tx, mut rx) = mpsc::channel(32);
+    OwnerBuilder::new().start(initial_state)
+  }
 
-    tokio::spawn({
-      let mut ctx = Context {
-        tx: tx.clone(),
-        token: token.child_token(),
-      };
-      let token = token.child_token();
-      async move {
-        let mut state = initial_state;
-
-        state.started(&mut ctx).await;
-
-        loop {
-          tokio::select! {
-            _ = token.cancelled() => {
-              state.stopped().await;
-              break;
-            }
-            Some(item) = rx.recv() => {
-              match item {
-                ContainerMessage::Item(mut item) => {
-                  item.handle(&mut state, &mut ctx).await;
-                }
-                ContainerMessage::Terminate(tx) => {
-                  rx.close();
-
-                  // drain messages
-                  while let Some(item) = rx.recv().await {
-                    match item {
-                      ContainerMessage::Item(mut item) => {
-                        item.handle(&mut state, &mut ctx).await;
-                      }
-                      ContainerMessage::Terminate(_) => unreachable!(),
-                    }
-                  }
-
-                  tx.send(state).ok();
-                  break;
-                }
-              }
-            }
-          }
-        }
-      }
-    });
-
-    Self { tx, token }
+  pub fn build() -> OwnerBuilder<S> {
+    OwnerBuilder::new()
   }
 
   pub fn addr(&self) -> Addr<S> {
@@ -402,6 +359,85 @@ where
       .await
       .map_err(|_| Error::WorkerGone)?;
     rx.await.map_err(|_| Error::WorkerGone)
+  }
+}
+
+#[derive(Debug)]
+pub struct OwnerBuilder<S> {
+  mailbox_capacity: usize,
+  _p: PhantomData<S>,
+}
+
+impl<S> OwnerBuilder<S> {
+  const DEFAULT_MAILBOX_CAPACITY: usize = 32;
+
+  fn new() -> Self {
+    OwnerBuilder {
+      mailbox_capacity: Self::DEFAULT_MAILBOX_CAPACITY,
+      _p: PhantomData,
+    }
+  }
+
+  pub fn mailbox_capacity(self, mailbox_capacity: usize) -> Self {
+    Self {
+      mailbox_capacity,
+      ..self
+    }
+  }
+
+  pub fn start(self, initial_state: S) -> Owner<S>
+  where
+    S: Actor,
+  {
+    let token = CancellationToken::new();
+    let (tx, mut rx) = mpsc::channel(self.mailbox_capacity);
+
+    tokio::spawn({
+      let mut ctx = Context {
+        tx: tx.clone(),
+        token: token.child_token(),
+      };
+      let token = token.child_token();
+      async move {
+        let mut state = initial_state;
+
+        state.started(&mut ctx).await;
+
+        loop {
+          tokio::select! {
+            _ = token.cancelled() => {
+              state.stopped().await;
+              break;
+            }
+            Some(item) = rx.recv() => {
+              match item {
+                ContainerMessage::Item(mut item) => {
+                  item.handle(&mut state, &mut ctx).await;
+                }
+                ContainerMessage::Terminate(tx) => {
+                  rx.close();
+
+                  // drain messages
+                  while let Some(item) = rx.recv().await {
+                    match item {
+                      ContainerMessage::Item(mut item) => {
+                        item.handle(&mut state, &mut ctx).await;
+                      }
+                      ContainerMessage::Terminate(_) => unreachable!(),
+                    }
+                  }
+
+                  tx.send(state).ok();
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+
+    Owner { tx, token }
   }
 }
 
