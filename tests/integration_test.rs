@@ -125,6 +125,37 @@ async fn test_notify() {
   a2.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn test_mailbox_capacity() {
+  use std::time::Duration;
+
+  struct M;
+  impl Message for M {
+    type Result = ();
+  }
+
+  struct A;
+
+  impl Actor for A {}
+
+  #[async_trait]
+  impl Handler<M> for A {
+    async fn handle(&mut self, _ctx: &mut Context<Self>, _: M) {
+      std::future::pending().await
+    }
+  }
+
+  let owner = Owner::build().mailbox_capacity(1).start(A);
+  owner.notify(M).await.unwrap();
+  owner.notify(M).await.unwrap();
+  let err = owner
+    .notify_timeout(Duration::from_millis(100), M)
+    .await
+    .err()
+    .unwrap();
+  assert_eq!(err, flo_state::error::Error::SendTimeout);
+}
+
 struct State {
   value: i64,
 }
