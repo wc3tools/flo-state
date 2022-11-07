@@ -156,6 +156,39 @@ async fn test_mailbox_capacity() {
   assert_eq!(err, flo_state::error::Error::SendTimeout);
 }
 
+#[tokio::test]
+async fn test_deterministic_drop() {
+  use tokio::sync::oneshot;
+
+  struct M {
+    tx: oneshot::Sender<()>
+  }
+  impl Message for M {
+    type Result = ();
+  }
+
+  struct A;
+
+  impl Actor for A {}
+
+  #[async_trait]
+  impl Handler<M> for A {
+    async fn handle(&mut self, _ctx: &mut Context<Self>, msg: M) {
+      std::future::pending::<()>().await;
+      msg.tx.send(()).ok();
+    }
+  }
+
+  let owner = Owner::build().mailbox_capacity(1).start(A);
+  let (tx, rx) = oneshot::channel();
+  let m = M {
+    tx
+  };
+  owner.notify(m).await.unwrap();
+  drop(owner);
+  assert!(rx.await.is_err());
+}
+
 struct State {
   value: i64,
 }

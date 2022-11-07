@@ -400,6 +400,7 @@ impl<S> OwnerBuilder<S> {
       let token = token.child_token();
       async move {
         let mut state = initial_state;
+        let mut dropping = false;
 
         state.started(&mut ctx).await;
 
@@ -409,10 +410,17 @@ impl<S> OwnerBuilder<S> {
               state.stopped().await;
               break;
             }
-            Some(item) = rx.recv() => {
+            Some(item) = rx.recv(), if !dropping => {
               match item {
                 ContainerMessage::Item(mut item) => {
-                  item.handle(&mut state, &mut ctx).await;
+                  let handling = item.handle(&mut state, &mut ctx);
+                  tokio::select! {
+                    _ = handling => {},
+                    _ = token.cancelled() => {
+                      dropping = true;
+                      continue;
+                    }
+                  }
                 }
                 ContainerMessage::Terminate(tx) => {
                   rx.close();
